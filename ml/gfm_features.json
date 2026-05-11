@@ -1,1 +1,0 @@
-["rocof_hz_per_s", "thd_percent", "freq_deviation_hz", "voltage_deviation_pu", "output_active_power_kw", "output_reactive_power_kvar", "output_voltage_v", "output_frequency_hz", "dc_link_voltage_v", "junction_temp_c", "efficiency", "rocof_roll_mean", "rocof_roll_std", "rocof_roll_max", "freq_roll_std", "freq_roll_mean", "thd_roll_mean", "power_roll_std", "volt_roll_std"]
