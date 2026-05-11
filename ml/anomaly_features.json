@@ -1,0 +1,1 @@
+["power_draw_w", "cpu_power_w", "cpu_utilization", "memory_utilization", "disk_io_utilization", "network_utilization", "cpu_temp_c", "inlet_temp_c", "outlet_temp_c", "pue_contribution", "fan_speed_rpm", "temp_delta", "compute_ratio", "resource_pressure", "cpu_temp_roll_mean", "power_roll_std", "cpu_util_roll_mean", "temp_zscore"]
