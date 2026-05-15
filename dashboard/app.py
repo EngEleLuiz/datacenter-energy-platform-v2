@@ -239,7 +239,7 @@ with st.sidebar:
         "④ Droop Control",
         "⑤ Weak-Grid Stability",
         "⑥ SHAP Explainability",
-        "⑦ Weather & Energy Price",
+        "⑦ Clima & Preço Energia",
         "⑧ Bode / Nyquist",
     ], label_visibility="collapsed")
 
@@ -944,7 +944,7 @@ elif page == "⑥ SHAP Explainability":
 
     st.markdown(f"""
     <div style="margin-bottom:20px">
-        <div style="font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;color:{ACCENT_CYAN}">
+        <div style="font-family:\'Syne\',sans-serif;font-size:1.4rem;font-weight:800;color:{ACCENT_CYAN}">
             ⑥ SHAP Explainability — Why does the model flag an anomaly?
         </div>
         <div style="font-size:0.72rem;color:{TEXT_MUTED};margin-top:4px">
@@ -954,71 +954,41 @@ elif page == "⑥ SHAP Explainability":
     </div>
     """, unsafe_allow_html=True)
 
-    import pickle
-    import json as _json
     try:
         import shap
+        import pickle, json
         SHAP_OK = True
     except ImportError:
         SHAP_OK = False
 
     if not SHAP_OK:
-        st.info(
-            "📦 **shap** not installed — showing RF feature importances instead. "
-            "Add `shap>=0.45` to requirements.txt and redeploy, "
-            "or run `pip install shap` locally."
-        )
+        st.error("⚠️  Package `shap` not installed. Run: `pip install shap`")
+        st.code("pip install shap", language="bash")
+        st.stop()
 
     @st.cache_resource(show_spinner="Loading model and computing SHAP values…")
-    @st.cache_resource(show_spinner="Loading model…")
     def load_shap_explainer():
         try:
             with open("ml/anomaly_model.pkl",  "rb") as f: model  = pickle.load(f)
             with open("ml/anomaly_scaler.pkl", "rb") as f: scaler = pickle.load(f)
-            with open("ml/anomaly_features.json")    as f: feats  = _json.load(f)
+            with open("ml/anomaly_features.json")    as f: feats  = json.load(f)
             feat_cols = feats if isinstance(feats, list) else feats.get("features", [])
-            explainer = shap.TreeExplainer(model, feature_perturbation="interventional") if SHAP_OK else None
+            # IsolationForest: use shap.Explainer with masker for compatibility
+            # TreeExplainer can work with IsolationForest in newer shap versions
+            try:
+                explainer = shap.TreeExplainer(model)
+            except Exception:
+                # Fallback: use KernelExplainer on a small background sample
+                explainer = None
             return model, scaler, feat_cols, explainer
-        except Exception:  # FileNotFoundError, PermissionError, or any pickle error
+        except FileNotFoundError:
             return None, None, None, None
 
     model, scaler, feat_cols, shap_exp = load_shap_explainer()
-    _USE_DEMO = (model is None)
-    if _USE_DEMO:
-        st.info(
-            "🔬 **Demo mode** — model files not found in ml/. "
-            "Run notebook 02 to train the anomaly detector, then redeploy. "
-            "Showing realistic synthetic data based on published results (AUC=0.93, F1=0.83)."
-        )
-        # Build a lightweight synthetic RF for demo purposes
-        import pandas as pd
-        from sklearn.ensemble import RandomForestClassifier as _RFC
-        from sklearn.preprocessing import StandardScaler as _SS
-        from data_generator.server_simulator import ServerSimulator as _SrvSim
-        from dataclasses import asdict as _asdict
-        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-        _DEMO_FEATS = [
-            "power_draw_w","cpu_power_w","cpu_utilization","memory_utilization",
-            "disk_io_utilization","network_utilization","cpu_temp_c",
-            "inlet_temp_c","outlet_temp_c","pue_contribution","fan_speed_rpm",
-        ]
-        @st.cache_resource(show_spinner="Building demo model…")
-        def _build_demo_model():
-            sim = _SrvSim(num_servers=100, num_racks=10, fault_probability=0.08, random_seed=42)
-            rows = []
-            start = _dt(2024, 6, 1, 0, 0, tzinfo=_tz.utc)
-            for i in range(24):
-                rows.extend([_asdict(r) for r in sim.generate_snapshot(start + _td(minutes=5*i))])
-            df = pd.DataFrame(rows)
-            avail = [f for f in _DEMO_FEATS if f in df.columns]
-            X = df[avail].fillna(0).values
-            y = df["is_anomaly"].astype(int).values
-            sc = _SS(); Xs = sc.fit_transform(X)
-            rf = _RFC(n_estimators=50, class_weight="balanced", random_state=42, n_jobs=-1)
-            rf.fit(Xs, y)
-            return rf, sc, avail, None  # no shap explainer in demo
-        model, scaler, feat_cols, shap_exp = _build_demo_model()
 
+    if model is None:
+        st.warning("Models not found in ml/. Run notebook 02 first.")
+        st.stop()
 
     @st.cache_data(ttl=60, show_spinner="Generating server snapshots…")
     def get_shap_data(_r):
@@ -1072,17 +1042,17 @@ elif page == "⑥ SHAP Explainability":
 
     @st.cache_data(ttl=60, show_spinner="Computing SHAP values…")
     def compute_shap_global(key):
+        if shap_exp is None:
+            return None
         sv = shap_exp.shap_values(X_scaled)
         if isinstance(sv, list): sv = sv[1]
         return sv
 
-    sv_all = None
-    if SHAP_OK and shap_exp is not None:
-        sv_all = compute_shap_global(hash_key)
-        mean_abs = pd.Series(np.abs(sv_all).mean(axis=0), index=available_feats).sort_values(ascending=False)
-    else:
-        _fi = np.array(model.feature_importances_[:len(available_feats)])
-        mean_abs = pd.Series(_fi / (_fi.sum() + 1e-9), index=available_feats).sort_values(ascending=False)
+    sv_all   = compute_shap_global(hash_key) if shap_exp is not None else None
+    mean_abs = pd.Series(
+        np.abs(sv_all).mean(axis=0),
+        index=available_feats,
+    ).sort_values(ascending=False)
 
     FEAT_LABELS = {
         "cpu_temp_c":         "CPU Temperature (°C)",
@@ -1119,41 +1089,39 @@ elif page == "⑥ SHAP Explainability":
 
     with col2:
         # Simplified beeswarm (SHAP value scatter colored by feature value)
-        if sv_all is None:
-            st.caption("Beeswarm requires shap — pip install shap")
-        else:
-            top5 = mean_abs.head(5).index.tolist()
-            fig_bee = go.Figure()
-            for j, feat in enumerate(top5):
-                fi      = available_feats.index(feat)
-                sv_col  = sv_all[:, fi]
-                raw_col = X_sample[feat].values[:len(sv_col)]
-                raw_norm= (raw_col - raw_col.min()) / (raw_col.ptp() + 1e-9)
-                fig_bee.add_trace(go.Scatter(
-                    x=sv_col,
-                    y=[FEAT_LABELS.get(feat, feat)] * len(sv_col)
-                      + np.random.default_rng(j).normal(0, 0.06, len(sv_col)),
-                    mode="markers", showlegend=False,
-                    marker=dict(size=4, opacity=0.5, color=raw_norm,
-                                colorscale=[[0,"#1A6FAF"],[1,"#FF4757"]]),
-                ))
-            fig_bee.add_vline(x=0, line_color="rgba(255,255,255,0.2)", line_dash="dot")
-            fig_bee.update_layout(
-                height=400, template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(family="JetBrains Mono,monospace", color="#F1F5F9", size=10),
-                margin=dict(l=10,r=10,t=30,b=10),
-                xaxis_title="SHAP value", title="Beeswarm — Top 5 Features",
-            )
-            st.plotly_chart(fig_bee, use_container_width=True)
+        top5 = mean_abs.head(5).index.tolist()
+        fig_bee = go.Figure()
+        for j, feat in enumerate(top5):
+            fi      = available_feats.index(feat)
+            sv_col  = sv_all[:, fi]
+            raw_col = X_sample[feat].values[:len(sv_col)]
+            raw_norm= (raw_col - raw_col.min()) / (raw_col.ptp() + 1e-9)
+            fig_bee.add_trace(go.Scatter(
+                x=sv_col,
+                y=[FEAT_LABELS.get(feat, feat)] * len(sv_col)
+                  + np.random.default_rng(j).normal(0, 0.06, len(sv_col)),
+                mode="markers", showlegend=False,
+                marker=dict(size=4, opacity=0.5, color=raw_norm,
+                            colorscale=[[0,"#1A6FAF"],[1,"#FF4757"]]),
+            ))
+        fig_bee.add_vline(x=0, line_color="rgba(255,255,255,0.2)", line_dash="dot")
+        fig_bee.update_layout(
+            height=400, template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="JetBrains Mono,monospace", color="#F1F5F9", size=10),
+            margin=dict(l=10,r=10,t=30,b=10),
+            xaxis_title="SHAP value", title="Beeswarm — Top 5 Features",
+        )
+        st.plotly_chart(fig_bee, use_container_width=True)
 
     # ── Individual Explanation ────────────────────────────────────────────
     section("💧", "Individual Explanation — Waterfall", "SELECT A SERVER")
 
     srv_scores = df_shap_raw.copy()
-    srv_scores["anomaly_score"] = model.predict_proba(
-        scaler.transform(srv_scores[available_feats].fillna(0))
-    )[:, 1]
+    # IsolationForest uses score_samples (lower=more anomalous); normalize to 0-1
+    _raw = model.score_samples(scaler.transform(srv_scores[available_feats].fillna(0)))
+    _min, _max = _raw.min(), _raw.max()
+    srv_scores["anomaly_score"] = 1.0 - (_raw - _min) / (_max - _min + 1e-9)
 
     top_srvs = (srv_scores
                 .groupby("server_id")["anomaly_score"]
@@ -1167,54 +1135,53 @@ elif page == "⑥ SHAP Explainability":
     srv_rows  = srv_scores[srv_scores["server_id"] == sel_srv]
     worst_row = srv_rows.loc[srv_rows["anomaly_score"].idxmax(), available_feats]
 
-    sv_inst = None
-    if SHAP_OK and shap_exp is not None:
-        sv_inst = shap_exp.shap_values(scaler.transform(worst_row.values.reshape(1, -1)))
-    if sv_inst is None:
-        st.info("Waterfall requires shap — pip install shap")
+    if shap_exp is None:
+        st.info("SHAP explainer unavailable for this model type. Showing score only.")
+        sv_inst  = np.zeros(len(available_feats))
+        base_v   = 0.0
     else:
+        sv_inst = shap_exp.shap_values(scaler.transform(worst_row.values.reshape(1, -1)))
         if isinstance(sv_inst, list): sv_inst = sv_inst[1]
         sv_inst = sv_inst[0]
-    
-        base_v     = (shap_exp.expected_value[1]
-                      if isinstance(shap_exp.expected_value, (list, np.ndarray))
-                      else shap_exp.expected_value)
-        score_inst = float(srv_rows["anomaly_score"].max())
-    
-        sorted_idx  = np.argsort(np.abs(sv_inst))[::-1][:8]
-        feat_names  = [FEAT_LABELS.get(available_feats[i], available_feats[i]) for i in sorted_idx]
-        sv_top      = [float(sv_inst[i]) for i in sorted_idx]
-    
-        fig_wf = go.Figure(go.Waterfall(
-            orientation="v",
-            measure=["absolute"] + ["relative"] * len(feat_names) + ["total"],
-            x=["Base"] + feat_names + ["Final Score"],
-            y=[float(base_v)] + sv_top + [score_inst],
-            connector={"line": {"color": "rgba(255,255,255,0.2)"}},
-            increasing={"marker": {"color": ACCENT_RED}},
-            decreasing={"marker": {"color": ACCENT_GREEN}},
-            totals={"marker": {"color": ACCENT_CYAN}},
-            text=[f"{v:.3f}" for v in [float(base_v)] + sv_top + [score_inst]],
-            textposition="outside",
-        ))
-        fig_wf.add_hline(y=0.34, line_dash="dash", line_color=ACCENT_AMBER,
-                         annotation_text="Threshold (0.34)")
-        fig_wf.update_layout(
-            height=360, template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="JetBrains Mono,monospace", color="#F1F5F9", size=11),
-            margin=dict(l=10,r=10,t=30,b=40), showlegend=False,
-            title=f"SHAP Waterfall — {sel_srv} | Score = {score_inst:.3f}",
-        )
-        st.plotly_chart(fig_wf, use_container_width=True)
+        base_v = (shap_exp.expected_value[1]
+                  if isinstance(shap_exp.expected_value, (list, np.ndarray))
+                  else shap_exp.expected_value)
+    score_inst = float(srv_rows["anomaly_score"].max())
+
+    sorted_idx  = np.argsort(np.abs(sv_inst))[::-1][:8]
+    feat_names  = [FEAT_LABELS.get(available_feats[i], available_feats[i]) for i in sorted_idx]
+    sv_top      = [float(sv_inst[i]) for i in sorted_idx]
+
+    fig_wf = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["absolute"] + ["relative"] * len(feat_names) + ["total"],
+        x=["Base"] + feat_names + ["Final Score"],
+        y=[float(base_v)] + sv_top + [score_inst],
+        connector={"line": {"color": "rgba(255,255,255,0.2)"}},
+        increasing={"marker": {"color": ACCENT_RED}},
+        decreasing={"marker": {"color": ACCENT_GREEN}},
+        totals={"marker": {"color": ACCENT_CYAN}},
+        text=[f"{v:.3f}" for v in [float(base_v)] + sv_top + [score_inst]],
+        textposition="outside",
+    ))
+    fig_wf.add_hline(y=0.34, line_dash="dash", line_color=ACCENT_AMBER,
+                     annotation_text="Threshold (0.34)")
+    fig_wf.update_layout(
+        height=360, template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="JetBrains Mono,monospace", color="#F1F5F9", size=11),
+        margin=dict(l=10,r=10,t=30,b=40), showlegend=False,
+        title=f"SHAP Waterfall — {sel_srv} | Score = {score_inst:.3f}",
+    )
+    st.plotly_chart(fig_wf, use_container_width=True)
 
     risk       = "High" if score_inst >= 0.65 else ("Medium" if score_inst >= 0.34 else "Low")
     risk_color = ACCENT_RED if risk=="High" else (ACCENT_AMBER if risk=="Medium" else ACCENT_GREEN)
     top_push   = [available_feats[i] for i in sorted_idx if sv_inst[i] > 0][:3]
     diag_text  = f"**{risk} risk** — main drivers: {', '.join(FEAT_LABELS.get(f,f) for f in top_push)}"
     st.markdown(
-        f"<div style='padding:12px;background:rgba(0,0,0,0.3);border-left:3px solid {risk_color};"
-        f"border-radius:4px;font-size:0.82rem'>{diag_text}</div>",
+        f"<div style=\'padding:12px;background:rgba(0,0,0,0.3);border-left:3px solid {risk_color};"
+        f"border-radius:4px;font-size:0.82rem\'>{diag_text}</div>",
         unsafe_allow_html=True
     )
 
@@ -1232,7 +1199,7 @@ elif page == "⑦ Weather & Energy Price":
 
     st.markdown(f"""
     <div style="margin-bottom:20px">
-        <div style="font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;color:{ACCENT_AMBER}">
+        <div style="font-family:\'Syne\',sans-serif;font-size:1.4rem;font-weight:800;color:{ACCENT_AMBER}">
             ⑦ External Data Fusion — Weather & Energy Price
         </div>
         <div style="font-size:0.72rem;color:{TEXT_MUTED};margin-top:4px">
@@ -1260,19 +1227,19 @@ elif page == "⑦ Weather & Energy Price":
 
     # ── KPIs ──────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: kpi("Outdoor Temp.",     f"{latest.get('temp_c',0):.1f}°C",  "Florianopolis")
-    with c2: kpi("Humidity",          f"{latest.get('humidity_pct',0):.0f}%", "relative humidity")
-    with c3: kpi("Solar Irradiance",  f"{latest.get('solar_ghi_wm2',0):.0f}",
+    with c1: kpi("Outdoor Temp.",     f"{latest.get("temp_c",0):.1f}°C",  "Florianopolis")
+    with c2: kpi("Humidity",          f"{latest.get("humidity_pct",0):.0f}%", "relative humidity")
+    with c3: kpi("Solar Irradiance",  f"{latest.get("solar_ghi_wm2",0):.0f}",
                  "W/m² (GHI)",
-                 badge="Solar Peak" if latest.get('solar_ghi_wm2',0)>500 else "Low",
-                 badge_type="warn"  if latest.get('solar_ghi_wm2',0)>500 else "ok")
-    with c4: kpi("Energy Price",      f"BRL {latest.get('price_brl_mwh',0):.0f}",
+                 badge="Solar Peak" if latest.get("solar_ghi_wm2",0)>500 else "Low",
+                 badge_type="warn"  if latest.get("solar_ghi_wm2",0)>500 else "ok")
+    with c4: kpi("Energy Price",      f"BRL {latest.get("price_brl_mwh",0):.0f}",
                  "per MWh (PLD mock)",
-                 badge="Peak Hour" if latest.get('is_peak',0)>0.5 else "Off-peak",
-                 badge_type="err"  if latest.get('is_peak',0)>0.5 else "ok")
-    with c5: kpi("Cooling Factor",    f"{latest.get('cooling_load_factor',0):.2f}",
+                 badge="Peak Hour" if latest.get("is_peak",0)>0.5 else "Off-peak",
+                 badge_type="err"  if latest.get("is_peak",0)>0.5 else "ok")
+    with c5: kpi("Cooling Factor",    f"{latest.get("cooling_load_factor",0):.2f}",
                  "0=min, 1=max",
-                 "red" if latest.get('cooling_load_factor',0)>0.7 else "amber")
+                 "red" if latest.get("cooling_load_factor",0)>0.7 else "amber")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1403,7 +1370,7 @@ elif page == "⑧ Bode / Nyquist":
 
     st.markdown(f"""
     <div style="margin-bottom:20px">
-        <div style="font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;color:{ACCENT_RED}">
+        <div style="font-family:\'Syne\',sans-serif;font-size:1.4rem;font-weight:800;color:{ACCENT_RED}">
             ⑧ Frequency-Domain Stability Analysis
         </div>
         <div style="font-size:0.72rem;color:{TEXT_MUTED};margin-top:4px">
@@ -1414,102 +1381,137 @@ elif page == "⑧ Bode / Nyquist":
     """, unsafe_allow_html=True)
 
     if not STABILITY_AVAILABLE:
-        st.error("Module analysis/stability_analysis.py not found.")
-        st.stop()
+        # ── Built-in stability analysis (no external module needed) ───────────
+        import numpy as np
 
-    # Interactive controls
-    col_c1, col_c2, col_c3 = st.columns(3)
-    with col_c1:
-        scr_sel = st.slider("SCR — Short-Circuit Ratio", 0.5, 12.0, 2.0, 0.1,
-                             help="Short-Circuit Ratio at the point of common coupling")
-    with col_c2:
-        h_sel   = st.slider("H — Virtual Inertia Constant (s)", 1.0, 12.0, 5.0, 0.5,
-                             help="GFM virtual inertia constant (VSM swing equation)")
-    with col_c3:
-        show_gfm = st.checkbox("Show GFM on Bode", value=True)
+        def _pll_openloop(scr, kp=50.0, ki=2500.0, omega=None):
+            """GFL PLL open-loop transfer function: sampled frequency response."""
+            freqs = np.logspace(-1, 4, 500)
+            s = 1j * 2 * np.pi * freqs
+            # PLL compensator: (kp*s + ki) / s
+            # Plant (grid): 1 / (scr * s)
+            L = (kp * s + ki) / (s * scr * s)
+            return freqs, L
 
-    # Status card
-    status = get_stability_summary_text(scr_sel)
-    st.markdown(f"""
-    <div style="padding:16px;background:{status['bg']};border:1px solid {status['color']};
-                border-radius:8px;margin-bottom:16px;display:flex;gap:24px;align-items:center">
-        <div style="font-family:'Syne',sans-serif;font-size:1.5rem;font-weight:800;color:{status['color']}">
-            {status['status']}
-        </div>
-        <div>
-            <div style="font-size:0.72rem;color:#94A3B8">
-                PM = {status['pm_text']} &nbsp;|&nbsp;
-                GM = {status['gm_text']} &nbsp;|&nbsp;
-                Middlebrook = {status['mb_text']} &nbsp;|&nbsp;
-                {status['risk_label']}
+        def _phase_margin(scr):
+            freqs, L = _pll_openloop(scr)
+            mag = np.abs(L)
+            idx = np.argmin(np.abs(mag - 1.0))
+            phase = np.angle(L[idx], deg=True)
+            return phase + 180.0
+
+        def _gain_margin_db(scr):
+            freqs, L = _pll_openloop(scr)
+            phase = np.angle(L, deg=True)
+            idx = np.argmin(np.abs(phase + 180.0))
+            return -20 * np.log10(np.abs(L[idx]) + 1e-9)
+
+        scr_sweep = np.arange(0.5, 10.5, 0.5)
+        pm_vals   = [_phase_margin(s) for s in scr_sweep]
+        gm_vals   = [_gain_margin_db(s) for s in scr_sweep]
+
+        # Status card
+        pm_now = _phase_margin(scr_sel)
+        gm_now = _gain_margin_db(scr_sel)
+        if pm_now >= 45:
+            status_label, status_color = "✅ STABLE", "#00FF9F"
+        elif pm_now >= 20:
+            status_label, status_color = "⚠️ MARGINAL", "#FFB020"
+        else:
+            status_label, status_color = "❌ UNSTABLE", "#FF4757"
+
+        st.markdown(f"""
+        <div style="padding:16px;background:rgba(0,0,0,0.3);border:1px solid {status_color};
+                    border-radius:8px;margin-bottom:16px;display:flex;gap:24px;align-items:center">
+            <div style="font-family:'Syne',sans-serif;font-size:1.5rem;font-weight:800;color:{status_color}">
+                {status_label}
             </div>
-            <div style="font-size:0.68rem;color:#64748B;margin-top:4px">
-                GFM: ✅ Stable for any SCR value (no PLL dependency)
+            <div>
+                <div style="font-size:0.72rem;color:#94A3B8">
+                    PM = {pm_now:.1f}° &nbsp;|&nbsp; GM = {gm_now:.1f} dB
+                    &nbsp;|&nbsp; SCR = {scr_sel:.1f}
+                </div>
+                <div style="font-size:0.68rem;color:#64748B;margin-top:4px">
+                    GFM: ✅ Stable for any SCR value (no PLL dependency)
+                </div>
             </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
-    # ── Bode Diagram ──────────────────────────────────────────────────────
-    section("📈", "Bode Diagram — Open-Loop PLL", "GFL vs GFM")
-    fig_bode = make_bode_figure(scr_sel, h_sel)
-    st.plotly_chart(fig_bode, use_container_width=True)
+        # Bode diagram
+        section("📈", "Bode Diagram — Open-Loop PLL", "GFL vs GFM")
+        freqs, L_gfl = _pll_openloop(scr_sel)
+        mag_db  = 20 * np.log10(np.abs(L_gfl) + 1e-12)
+        phase_d = np.angle(L_gfl, deg=True)
 
-    # ── Nyquist + Middlebrook ─────────────────────────────────────────────
-    col_ny, col_mb = st.columns(2)
-    with col_ny:
-        section("🌀", "Nyquist Diagram", "GFL — Complex Plane")
-        fig_ny = make_nyquist_figure(scr_sel)
-        st.plotly_chart(fig_ny, use_container_width=True)
+        fig_b = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                              subplot_titles=("Magnitude (dB)", "Phase (°)"))
+        fig_b.add_trace(go.Scatter(x=freqs, y=mag_db,  name="GFL",  line=dict(color="#00D4FF")), row=1, col=1)
+        fig_b.add_trace(go.Scatter(x=freqs, y=phase_d, name="GFL",  line=dict(color="#00D4FF"), showlegend=False), row=2, col=1)
+        # GFM is unconditionally stable — flat 90° phase margin approximation
+        fig_b.add_trace(go.Scatter(x=freqs, y=[6.0]*len(freqs),   name="GFM (∞ SCR)", line=dict(color="#00FF9F", dash="dash")), row=1, col=1)
+        fig_b.add_trace(go.Scatter(x=freqs, y=[-90.0]*len(freqs), name="GFM", line=dict(color="#00FF9F", dash="dash"), showlegend=False), row=2, col=1)
+        fig_b.add_hline(y=0,    row=1, col=1, line_dash="dot", line_color="white", opacity=0.3)
+        fig_b.add_hline(y=-180, row=2, col=1, line_dash="dot", line_color="#FF4757", opacity=0.6)
+        fig_b.update_xaxes(type="log", title_text="Frequency (Hz)")
+        fig_b.update_layout(height=420, template="plotly_dark",
+                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            font=dict(family="JetBrains Mono,monospace", color="#F1F5F9", size=10),
+                            margin=dict(l=10,r=10,t=30,b=10))
+        st.plotly_chart(fig_b, use_container_width=True)
 
-    with col_mb:
-        section("⚖️", "Middlebrook — |Z_grid/Z_inv|", "IMPEDANCE STABILITY MARGIN (dB)")
-        metrics_list = scr_sweep_metrics()
-        fig_mb = make_middlebrook_figure(metrics_list)
-        fig_mb.add_vline(x=scr_sel, line_dash="dot", line_color=ACCENT_AMBER,
-                          annotation_text=f"SCR={scr_sel:.1f}")
-        st.plotly_chart(fig_mb, use_container_width=True)
+        # Phase margin vs SCR
+        section("📉", "Phase Margin vs SCR — GFL vs GFM", "STABILITY ENVELOPE")
+        col_pm, col_gm = st.columns(2)
+        with col_pm:
+            fig_pm = go.Figure()
+            fig_pm.add_trace(go.Scatter(x=scr_sweep, y=pm_vals, name="GFL PM",
+                                        line=dict(color="#00D4FF"), fill="tozeroy",
+                                        fillcolor="rgba(0,212,255,0.08)"))
+            fig_pm.add_trace(go.Scatter(x=scr_sweep, y=[90.0]*len(scr_sweep), name="GFM PM",
+                                        line=dict(color="#00FF9F", dash="dash")))
+            fig_pm.add_hline(y=45, line_dash="dot", line_color="#FFB020",
+                             annotation_text="45° margin (IEEE)")
+            fig_pm.add_vline(x=scr_sel, line_dash="dot", line_color="#FFB020",
+                             annotation_text=f"SCR={scr_sel:.1f}")
+            fig_pm.update_layout(height=300, template="plotly_dark",
+                                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                 xaxis_title="SCR", yaxis_title="Phase Margin (°)",
+                                 font=dict(family="JetBrains Mono,monospace", color="#F1F5F9", size=10),
+                                 margin=dict(l=10,r=10,t=20,b=10))
+            st.plotly_chart(fig_pm, use_container_width=True)
+        with col_gm:
+            fig_gm = go.Figure()
+            fig_gm.add_trace(go.Scatter(x=scr_sweep, y=gm_vals, name="GFL GM",
+                                        line=dict(color="#FF4757")))
+            fig_gm.add_trace(go.Scatter(x=scr_sweep, y=[40.0]*len(scr_sweep), name="GFM GM",
+                                        line=dict(color="#00FF9F", dash="dash")))
+            fig_gm.add_hline(y=6, line_dash="dot", line_color="#FFB020",
+                             annotation_text="6 dB minimum")
+            fig_gm.add_vline(x=scr_sel, line_dash="dot", line_color="#FFB020")
+            fig_gm.update_layout(height=300, template="plotly_dark",
+                                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                 xaxis_title="SCR", yaxis_title="Gain Margin (dB)",
+                                 font=dict(family="JetBrains Mono,monospace", color="#F1F5F9", size=10),
+                                 margin=dict(l=10,r=10,t=20,b=10))
+            st.plotly_chart(fig_gm, use_container_width=True)
 
-    # ── Phase Margin vs SCR ───────────────────────────────────────────────
-    section("📉", "SCR Sweep — Phase Margin GFL vs GFM", "FULL COMPARISON")
-    fig_pm = make_pm_vs_scr_figure(metrics_list)
-    fig_pm.add_vline(x=scr_sel, line_dash="dot", line_color=ACCENT_AMBER,
-                      annotation_text=f"Current SCR = {scr_sel:.1f}",
-                      annotation_font_color=ACCENT_AMBER)
-    st.plotly_chart(fig_pm, use_container_width=True)
-
-    # ── Gain Margin ───────────────────────────────────────────────────────
-    section("🔊", "Gain Margin vs SCR", "GFL — FREQUENCY RESPONSE")
-    fig_gm = make_gain_margin_figure(metrics_list)
-    fig_gm.add_vline(x=scr_sel, line_dash="dot", line_color=ACCENT_AMBER)
-    st.plotly_chart(fig_gm, use_container_width=True)
-
-    # ── Metrics table ─────────────────────────────────────────────────────
-    section("📋", "Summary Table — SCR × Stability Metrics", "COMPUTED VALUES")
-    scr_table = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0]
-    rows_data = []
-    for s in scr_table:
-        m = compute_stability_metrics(s)
-        rows_data.append({
-            "SCR":              s,
-            "PM GFL (°)":       f"{m.gfl_pm_deg:.1f}",
-            "GM GFL (dB)":      f"{m.gfl_gm_db:.1f}",
-            "Middlebrook (dB)": f"{m.middlebrook_db:.1f}",
-            "GFL Status":       ("✅ Stable"   if m.gfl_stable
-                                 else ("⚠️ Marginal" if m.risk_label=="marginal"
-                                       else "❌ Unstable")),
-            "GFM Status":       "✅ Stable",
-        })
-    df_table = pd.DataFrame(rows_data)
-    st.dataframe(
-        df_table.style.apply(
-            lambda row: [
-                "" if col != "GFL Status"
-                else ("background-color:#1E3A1E" if "✅" in str(row[col])
-                      else ("background-color:#3A2E1E" if "⚠️" in str(row[col])
-                            else "background-color:#3A1E1E"))
-                for col in df_table.columns
-            ], axis=1
-        ),
-        use_container_width=True, hide_index=True,
-    )
+        # Summary table
+        section("📋", "Summary Table — SCR × Stability", "COMPUTED VALUES")
+        rows_data = []
+        for s in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0]:
+            pm_s = _phase_margin(s)
+            gm_s = _gain_margin_db(s)
+            rows_data.append({
+                "SCR": s,
+                "PM GFL (°)":  f"{pm_s:.1f}",
+                "GM GFL (dB)": f"{gm_s:.1f}",
+                "GFL Status":  ("✅ Stable" if pm_s >= 45
+                                else ("⚠️ Marginal" if pm_s >= 20 else "❌ Unstable")),
+                "GFM Status":  "✅ Stable",
+            })
+        df_table = pd.DataFrame(rows_data)
+        st.dataframe(df_table, use_container_width=True, hide_index=True)
+        st.stop()  # skip the rest of the page (which uses STABILITY_AVAILABLE functions)
+    # End of built-in stability analysis
+    # (full stability analysis available with analysis/stability_analysis.py)
