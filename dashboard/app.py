@@ -1227,17 +1227,17 @@ elif page == "⑦ Weather & Energy Price":
 
     # ── KPIs ──────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: kpi("Outdoor Temp.",     f"{latest.get("temp_c",0):.1f}°C",  "Florianopolis")
-    with c2: kpi("Humidity",          f"{latest.get("humidity_pct",0):.0f}%", "relative humidity")
-    with c3: kpi("Solar Irradiance",  f"{latest.get("solar_ghi_wm2",0):.0f}",
+    with c1: kpi("Outdoor Temp.",     f"{latest.get('temp_c',0):.1f}°C",  "Florianopolis")
+    with c2: kpi("Humidity",          f"{latest.get('humidity_pct',0):.0f}%", "relative humidity")
+    with c3: kpi("Solar Irradiance",  f"{latest.get('solar_ghi_wm2',0):.0f}",
                  "W/m² (GHI)",
                  badge="Solar Peak" if latest.get("solar_ghi_wm2",0)>500 else "Low",
                  badge_type="warn"  if latest.get("solar_ghi_wm2",0)>500 else "ok")
-    with c4: kpi("Energy Price",      f"BRL {latest.get("price_brl_mwh",0):.0f}",
+    with c4: kpi("Energy Price",      f"BRL {latest.get('price_brl_mwh',0):.0f}",
                  "per MWh (PLD mock)",
                  badge="Peak Hour" if latest.get("is_peak",0)>0.5 else "Off-peak",
                  badge_type="err"  if latest.get("is_peak",0)>0.5 else "ok")
-    with c5: kpi("Cooling Factor",    f"{latest.get("cooling_load_factor",0):.2f}",
+    with c5: kpi("Cooling Factor",    f"{latest.get('cooling_load_factor',0):.2f}",
                  "0=min, 1=max",
                  "red" if latest.get("cooling_load_factor",0)>0.7 else "amber")
 
