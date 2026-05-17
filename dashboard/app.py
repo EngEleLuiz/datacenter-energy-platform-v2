@@ -239,7 +239,7 @@ with st.sidebar:
         "④ Droop Control",
         "⑤ Weak-Grid Stability",
         "⑥ SHAP Explainability",
-        "⑦ Clima & Preço Energia",
+        "⑦ Weather & Energy Price",
         "⑧ Bode / Nyquist",
     ], label_visibility="collapsed")
 
@@ -973,22 +973,50 @@ elif page == "⑥ SHAP Explainability":
             with open("ml/anomaly_scaler.pkl", "rb") as f: scaler = pickle.load(f)
             with open("ml/anomaly_features.json")    as f: feats  = json.load(f)
             feat_cols = feats if isinstance(feats, list) else feats.get("features", [])
-            # IsolationForest: use shap.Explainer with masker for compatibility
-            # TreeExplainer can work with IsolationForest in newer shap versions
             try:
                 explainer = shap.TreeExplainer(model)
             except Exception:
-                # Fallback: use KernelExplainer on a small background sample
                 explainer = None
             return model, scaler, feat_cols, explainer
-        except FileNotFoundError:
+        except Exception:
+            # pkl version mismatch or missing — build a fresh demo model
             return None, None, None, None
 
     model, scaler, feat_cols, shap_exp = load_shap_explainer()
 
     if model is None:
-        st.warning("Models not found in ml/. Run notebook 02 first.")
-        st.stop()
+        # Build lightweight demo model on-the-fly (pkl version mismatch or missing)
+        from sklearn.ensemble import IsolationForest
+        from sklearn.preprocessing import StandardScaler as _SS
+        import json as _json
+        _srv = ServerSimulator(num_servers=200, num_racks=10,
+                               fault_probability=0.08, random_seed=42)
+        _rows = []
+        from datetime import datetime, timezone, timedelta
+        _ts = datetime.now(timezone.utc)
+        for _i in range(10):
+            _rows.extend([asdict(r) for r in _srv.generate_snapshot(
+                _ts - timedelta(minutes=5*_i))])
+        _df_demo = pd.DataFrame(_rows)
+        try:
+            with open("ml/anomaly_features.json") as _f:
+                _feats = _json.load(_f)
+            feat_cols = _feats if isinstance(_feats, list) else _feats.get("features", [])
+        except Exception:
+            feat_cols = ["cpu_utilization_pct","power_draw_w","cpu_temp_c",
+                         "fan_speed_rpm","outlet_temp_c","cpu_power_w"]
+        feat_cols = [f for f in feat_cols if f in _df_demo.columns]
+        _X_demo = _df_demo[feat_cols].fillna(0).values
+        scaler   = _SS().fit(_X_demo)
+        model    = IsolationForest(n_estimators=50, contamination=0.08,
+                                   random_state=42)
+        model.fit(scaler.transform(_X_demo))
+        try:
+            shap_exp = shap.TreeExplainer(model)
+        except Exception:
+            shap_exp = None
+        st.info("🤖 **Demo mode** — model rebuilt on synthetic data "
+                "(pkl version mismatch). Results are illustrative.", icon="🤖")
 
     @st.cache_data(ttl=60, show_spinner="Generating server snapshots…")
     def get_shap_data(_r):
@@ -1380,31 +1408,35 @@ elif page == "⑧ Bode / Nyquist":
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Sidebar controls (always visible) ────────────────────────────────────
+    scr_sel  = st.sidebar.slider("SCR Min",        0.5,  12.0,  2.0, 0.5,
+                                  help="Short-Circuit Ratio at PCC")
+    h_sel    = st.sidebar.slider("H — Inertia (s)", 1.0,  12.0,  5.0, 0.5,
+                                  help="GFM virtual inertia constant")
+
+    # ── Built-in stability functions (always defined, no external module needed) ──
+    import numpy as np
+
+    def _pll_openloop(scr, kp=50.0, ki=2500.0):
+        """GFL PLL open-loop transfer function: sampled frequency response."""
+        freqs = np.logspace(-1, 4, 500)
+        s = 1j * 2 * np.pi * freqs
+        L = (kp * s + ki) / (s * scr * s)
+        return freqs, L
+
+    def _phase_margin(scr):
+        freqs, L = _pll_openloop(scr)
+        mag = np.abs(L)
+        idx = np.argmin(np.abs(mag - 1.0))
+        return np.angle(L[idx], deg=True) + 180.0
+
+    def _gain_margin_db(scr):
+        freqs, L = _pll_openloop(scr)
+        phase = np.angle(L, deg=True)
+        idx = np.argmin(np.abs(phase + 180.0))
+        return -20 * np.log10(np.abs(L[idx]) + 1e-9)
+
     if not STABILITY_AVAILABLE:
-        # ── Built-in stability analysis (no external module needed) ───────────
-        import numpy as np
-
-        def _pll_openloop(scr, kp=50.0, ki=2500.0, omega=None):
-            """GFL PLL open-loop transfer function: sampled frequency response."""
-            freqs = np.logspace(-1, 4, 500)
-            s = 1j * 2 * np.pi * freqs
-            # PLL compensator: (kp*s + ki) / s
-            # Plant (grid): 1 / (scr * s)
-            L = (kp * s + ki) / (s * scr * s)
-            return freqs, L
-
-        def _phase_margin(scr):
-            freqs, L = _pll_openloop(scr)
-            mag = np.abs(L)
-            idx = np.argmin(np.abs(mag - 1.0))
-            phase = np.angle(L[idx], deg=True)
-            return phase + 180.0
-
-        def _gain_margin_db(scr):
-            freqs, L = _pll_openloop(scr)
-            phase = np.angle(L, deg=True)
-            idx = np.argmin(np.abs(phase + 180.0))
-            return -20 * np.log10(np.abs(L[idx]) + 1e-9)
 
         scr_sweep = np.arange(0.5, 10.5, 0.5)
         pm_vals   = [_phase_margin(s) for s in scr_sweep]
